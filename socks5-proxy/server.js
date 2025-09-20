@@ -1,8 +1,8 @@
 const net = require('net');
 const dotenv = require('dotenv');
-dotenv.config(); 
+dotenv.config();
 
-const PORT = process.env.PORT || 1080;  
+const PORT = process.env.PORT || 1080;
 const USERNAME = process.env.PROXY_USERNAME || 'admin';
 const PASSWORD = process.env.PROXY_PASSWORD || 'password';
 
@@ -15,47 +15,116 @@ function logConnection(socket, destinationHost, destinationPort) {
 const server = net.createServer((socket) => {
     console.log(`Client connected: ${socket.remoteAddress}`);
 
-    socket.once('data', (data) => {
-        if (data[0] === 0x05) {
-            socket.write(Buffer.from([0x05, 0x00]));
-        }
-    });
+    let stage = 0; // 0: handshake, 1: auth (if needed), 2: request
 
-    // Handle authentication 
+    let destinationSocket = null;
+
     socket.on('data', (data) => {
- 
-        if (data[1] === 0x01) {  
-            const username = data.slice(2, data.indexOf(0, 2));
-            const password = data.slice(data.indexOf(0, 2) + 1);
-
-            if (username.toString() === USERNAME && password.toString() === PASSWORD) {
-                socket.write(Buffer.from([0x05, 0x00])); 
-            } else {
-                socket.write(Buffer.from([0x05, 0x01]));
+        if (stage === 0) {
+            // SOCKS5 handshake
+            if (data[0] !== 0x05) {
                 socket.end();
                 return;
             }
+            // Only support username/password auth (0x02)
+            if (data.includes(0x02)) {
+                socket.write(Buffer.from([0x05, 0x02])); // Request username/password auth
+                stage = 1;
+            } else if (data.includes(0x00)) {
+                socket.write(Buffer.from([0x05, 0x00])); // No auth
+                stage = 2;
+            } else {
+                socket.write(Buffer.from([0x05, 0xFF])); // No acceptable methods
+                socket.end();
+            }
+            return;
         }
 
-        // Handle connection request
-        const destinationPort = data.readUInt16BE(2);  // Destination port (2 bytes)
-        const destinationHost = data.slice(4).toString();  // Destination host (IPv4)
+        if (stage === 1) {
+            // Username/password authentication
+            // RFC1929: [0x01][ulen][uname][plen][passwd]
+            if (data[0] !== 0x01) {
+                socket.write(Buffer.from([0x01, 0x01])); // Failure response
+                socket.end();
+                return;
+            }
+            const ulen = data[1];
+            const uname = data.slice(2, 2 + ulen).toString();
+            const plen = data[2 + ulen];
+            const passwd = data.slice(3 + ulen, 3 + ulen + plen).toString();
 
-        logConnection(socket, destinationHost, destinationPort);
+            // Log username and password to check if they're being received correctly
+            console.log(`Username: ${uname}, Password: ${passwd}`);
 
-        // Connect to the destination server
-        const destinationSocket = net.createConnection(destinationPort, destinationHost, () => {
-            socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
-        });
+            if (uname === USERNAME && passwd === PASSWORD) {
+                socket.write(Buffer.from([0x01, 0x00])); // Authentication success
+                stage = 2;
+            } else {
+                socket.write(Buffer.from([0x01, 0x01])); // Authentication failure
+                socket.end();
+            }
+            return;
+        }
 
-        // Forward data between client and destination
-        socket.pipe(destinationSocket);
-        destinationSocket.pipe(socket);
+        if (stage === 2) {
+            // SOCKS5 request
+            if (data.length < 7) {
+                socket.end();
+                return;
+            }
+            const cmd = data[1];
+            const addressType = data[3];
+            let destAddr, destPort, offset;
 
-        destinationSocket.on('error', (err) => {
-            console.error('Error with destination connection:', err);
-            socket.end();
-        });
+            if (addressType === 0x01) { // IPv4
+                destAddr = data.slice(4, 8).join('.');
+                destPort = data.readUInt16BE(8);
+                offset = 10;
+            } else if (addressType === 0x03) { // Domain
+                const len = data[4];
+                destAddr = data.slice(5, 5 + len).toString();
+                destPort = data.readUInt16BE(5 + len);
+                offset = 7 + len - 1;
+            } else if (addressType === 0x04) { // IPv6
+                destAddr = data.slice(4, 20).toString('hex').match(/.{1,4}/g).join(':');
+                destPort = data.readUInt16BE(20);
+                offset = 22;
+            } else {
+                socket.end();
+                return;
+            }
+
+            logConnection(socket, destAddr, destPort);
+
+            if (cmd !== 0x01) { // Only CONNECT supported
+                socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]));
+                socket.end();
+                return;
+            }
+
+            destinationSocket = net.createConnection(destPort, destAddr, () => {
+                socket.write(Buffer.from([0x05, 0x00, 0x00, addressType, ...data.slice(4, offset)]));
+                // Pipe data after connection established
+                socket.pipe(destinationSocket);
+                destinationSocket.pipe(socket);
+            });
+
+            destinationSocket.on('error', (err) => {
+                console.error('Error with destination connection:', err);
+                socket.end();
+            });
+
+            socket.on('end', () => {
+                if (destinationSocket) destinationSocket.end();
+            });
+
+            stage = 3; // Prevent further processing
+        }
+    });
+
+    socket.on('error', (err) => {
+        console.error('Socket error:', err);
+        socket.end();
     });
 });
 
