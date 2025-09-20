@@ -15,34 +15,32 @@ function logConnection(socket, destinationHost, destinationPort) {
 const server = net.createServer((socket) => {
     console.log(`Client connected: ${socket.remoteAddress}`);
 
-    let stage = 0; // 0: handshake, 1: auth (if needed), 2: request
+    let stage = 0; 
 
     let destinationSocket = null;
 
     socket.on('data', (data) => {
         if (stage === 0) {
-            // SOCKS5 handshake
             if (data[0] !== 0x05) {
                 socket.end();
                 return;
             }
-            // Only support username/password auth (0x02)
+         
             if (data.includes(0x02)) {
-                socket.write(Buffer.from([0x05, 0x02])); // Request username/password auth
+                socket.write(Buffer.from([0x05, 0x02])); 
                 stage = 1;
             } else if (data.includes(0x00)) {
-                socket.write(Buffer.from([0x05, 0x00])); // No auth
+                socket.write(Buffer.from([0x05, 0x00])); 
                 stage = 2;
             } else {
-                socket.write(Buffer.from([0x05, 0xFF])); // No acceptable methods
+                socket.write(Buffer.from([0x05, 0xFF])); 
                 socket.end();
             }
             return;
         }
 
         if (stage === 1) {
-            // Username/password authentication
-            // RFC1929: [0x01][ulen][uname][plen][passwd]
+            
             if (data[0] !== 0x01) {
                 socket.write(Buffer.from([0x01, 0x01])); // Failure response
                 socket.end();
@@ -53,7 +51,6 @@ const server = net.createServer((socket) => {
             const plen = data[2 + ulen];
             const passwd = data.slice(3 + ulen, 3 + ulen + plen).toString();
 
-            // Log username and password to check if they're being received correctly
             console.log(`Username: ${uname}, Password: ${passwd}`);
 
             if (uname === USERNAME && passwd === PASSWORD) {
@@ -96,7 +93,7 @@ const server = net.createServer((socket) => {
 
             logConnection(socket, destAddr, destPort);
 
-            if (cmd !== 0x01) { // Only CONNECT supported
+            if (cmd !== 0x01) { 
                 socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0,0,0,0, 0,0]));
                 socket.end();
                 return;
